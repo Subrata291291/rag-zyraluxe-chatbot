@@ -400,6 +400,18 @@ async def request_guard(
 # HEALTH
 # ============================================================
 
+@app.get("/")
+def root():
+    """Provide a useful response when the Render service URL is opened."""
+
+    return {
+        "service": "Zyraluxe Jewellery AI Assistant API",
+        "status": "ok",
+        "health": "/health",
+        "docs": "/docs",
+    }
+
+
 @app.get("/health")
 def health():
 
