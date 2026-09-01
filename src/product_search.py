@@ -1,11 +1,4 @@
-import numpy as np
-
-from sklearn.metrics.pairwise import cosine_similarity
-
-from src.embeddings import (
-    embed_text,
-    embed_texts
-)
+import re
 
 
 # ============================================================
@@ -49,12 +42,9 @@ def build_product_embeddings(products):
     Build embeddings for all products.
     """
 
-    texts = [
-        product_to_text(product)
-        for product in products
-    ]
-
-    return embed_texts(texts)
+    # Kept for backward compatibility. Retrieval is intentionally
+    # lightweight so the API can run on small Render instances.
+    return []
 
 
 # ============================================================
@@ -259,6 +249,51 @@ def filter_products(
 # SEMANTIC SEARCH
 # ============================================================
 
+def _tokens(value):
+    return set(
+        re.findall(
+            r"[a-z0-9]+",
+            str(value or "").lower(),
+        )
+    )
+
+
+def _rank_products(query, products, top_k):
+    """Rank catalogue products without loading an embedding model."""
+
+    query_tokens = _tokens(query)
+    ranked = []
+
+    for product in products:
+        name_tokens = _tokens(product.get("name"))
+        category_tokens = _tokens(product.get("category"))
+        details_tokens = _tokens(
+            " ".join(
+                str(product.get(key, ""))
+                for key in ("metal", "karat", "description", "sku")
+            )
+        )
+        score = float(
+            5 * len(query_tokens & name_tokens)
+            + 3 * len(query_tokens & category_tokens)
+            + len(query_tokens & details_tokens)
+        )
+        ranked.append((score, product))
+
+    ranked.sort(
+        key=lambda item: (
+            item[0],
+            bool(item[1].get("is_in_stock", False)),
+            -float(item[1].get("price", 0) or 0),
+        ),
+        reverse=True,
+    )
+
+    return [
+        {"product": product, "score": score}
+        for score, product in ranked[:max(1, int(top_k))]
+    ]
+
 def semantic_search(
     query,
     products,
@@ -280,6 +315,8 @@ def semantic_search(
     if not products:
 
         return []
+
+    return _rank_products(query, products, top_k)
 
 
     # --------------------------------------------------------
@@ -369,6 +406,12 @@ def filtered_semantic_search(
     if not filtered_products:
 
         return []
+
+    return _rank_products(
+        query,
+        filtered_products,
+        top_k,
+    )
 
 
     # ========================================================

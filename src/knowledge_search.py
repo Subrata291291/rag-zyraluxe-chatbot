@@ -1,11 +1,4 @@
-import numpy as np
-
-from sklearn.metrics.pairwise import cosine_similarity
-
-from src.embeddings import (
-    embed_text,
-    embed_texts
-)
+import re
 
 
 # ============================================================
@@ -16,12 +9,9 @@ def build_knowledge_embeddings(
     documents
 ):
 
-    texts = [
-        document["content"]
-        for document in documents
-    ]
-
-    return embed_texts(texts)
+    # Kept for compatibility with the chatbot interface.  The live
+    # service deliberately uses lightweight lexical retrieval.
+    return []
 
 
 # ============================================================
@@ -38,6 +28,31 @@ def search_knowledge(
     if not documents:
 
         return []
+
+    query_tokens = set(
+        re.findall(r"[a-z0-9]+", str(query or "").lower())
+    )
+
+    ranked = []
+
+    for document in documents:
+        document_tokens = set(
+            re.findall(
+                r"[a-z0-9]+",
+                " ".join(
+                    str(document.get(key, ""))
+                    for key in ("document", "content", "url")
+                ).lower(),
+            )
+        )
+        ranked.append((float(len(query_tokens & document_tokens)), document))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+
+    return [
+        {"document": document, "score": score}
+        for score, document in ranked[:max(1, int(top_k))]
+    ]
 
     query_embedding = embed_text(query)
 

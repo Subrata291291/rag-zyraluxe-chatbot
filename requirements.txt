@@ -2,8 +2,5 @@ fastapi
 uvicorn[standard]
 openai
 python-dotenv
-sentence-transformers
-scikit-learn
-numpy
 requests
 beautifulsoup4
