@@ -863,26 +863,10 @@ def validate_filters(
     # --------------------------------------------------------
     # Normal gold protection
     # --------------------------------------------------------
-    #
-    # If user explicitly asks for normal/solid gold and not
-    # gold plated, use solid_gold.
-    #
+    # Only set solid_gold if user explicitly asks for solid/pure gold
+    if re.search(r"\b(solid\s+gold|pure\s+gold|real\s+gold)\b", corrected_query.lower()):
+        filters["material_type"] = "solid_gold"
 
-    if (
-        filters["material_type"] is None
-        and filters["metal"] == "gold"
-        and not any(
-            re.search(
-                pattern,
-                corrected_query.lower()
-            )
-            for pattern in gold_plated_patterns
-        )
-    ):
-
-        filters["material_type"] = (
-            "solid_gold"
-        )
 
 
     return filters
@@ -1038,7 +1022,9 @@ Return only the JSON object.
 
             temperature=0,
 
-            timeout=30
+            timeout=30,
+
+            max_tokens=300
         )
 
 
@@ -1079,6 +1065,73 @@ Return only the JSON object.
     )
 
 
+def extract_fast_filters(query):
+    """
+    Extract structured filters deterministically using fast keyword/regex rules.
+    Returns (filters_dict, is_confident).
+    """
+    q = query.lower()
+    filters = empty_filters(query)
+    found_any = False
+
+    # 1. Category
+    category_patterns = [
+        (r"\b(ring|rings)\b", "ring"),
+        (r"\b(necklace|necklaces|chokker|choker|chain|chains)\b", "necklace"),
+        (r"\b(earring|earrings|jhumka|jhumki)\b", "earrings"),
+        (r"\b(bracelet|bracelets|bangle|bangles)\b", "bracelet"),
+        (r"\b(pendant|pendants|pendent|pendents)\b", "necklace"),
+        (r"\b(anklet|anklets)\b", "anklets"),
+    ]
+    for pattern, canonical in category_patterns:
+        if re.search(pattern, q):
+            filters["category"] = canonical
+            found_any = True
+            break
+
+    # 2. Metal & Material type
+    if re.search(r"\b(gold\s+plated|goldplated|gold\s+plating)\b", q):
+        filters["material_type"] = "gold_plated"
+        found_any = True
+    elif re.search(r"\b(solid\s+gold|pure\s+gold|real\s+gold)\b", q):
+        filters["metal"] = "gold"
+        filters["material_type"] = "solid_gold"
+        found_any = True
+    elif re.search(r"\bgold\b", q):
+        filters["metal"] = "gold"
+        found_any = True
+
+    if re.search(r"\bsilver\b", q):
+        filters["metal"] = "silver"
+        found_any = True
+
+    if re.search(r"\bbrass\b", q):
+        filters["metal"] = "brass"
+        found_any = True
+
+    # 3. Karat
+    karat_match = re.search(r"\b(9|14|18|22|24)\s*k(?:arat)?\b", q)
+    if karat_match:
+        filters["karat"] = f"{karat_match.group(1)}K"
+        found_any = True
+
+    # 4. Price
+    min_p, max_p = extract_price_filters(q)
+    if min_p is not None or max_p is not None:
+        filters["min_price"] = min_p
+        filters["max_price"] = max_p
+        found_any = True
+
+    # 5. Sorting
+    sort_by, sort_order = detect_sort(q)
+    if sort_by:
+        filters["sort_by"] = sort_by
+        filters["sort_order"] = sort_order
+        found_any = True
+
+    return filters, found_any
+
+
 # ============================================================
 # PUBLIC QUERY UNDERSTANDING FUNCTION
 # ============================================================
@@ -1090,15 +1143,11 @@ def understand_query(
     Convert natural-language product requests into
     deterministic structured filters.
 
-    This function is deliberately defensive:
-
+    Optimized for speed:
         1. Correct obvious typos locally.
-        2. Ask the LLM to understand the query.
-        3. Safely extract JSON.
-        4. Normalize every field.
-        5. Apply deterministic price extraction.
-        6. Apply deterministic sorting detection.
-        7. Protect gold vs gold-plated semantics.
+        2. Try fast deterministic extraction (0ms).
+        3. Only if no structured filters are recognized, query LLM.
+        4. Validate and normalize.
     """
 
     query = (
@@ -1124,7 +1173,16 @@ def understand_query(
 
 
     # --------------------------------------------------------
-    # STEP 2: DEFAULT STRUCTURE
+    # STEP 2: FAST DETERMINISTIC EXTRACTION
+    # --------------------------------------------------------
+    fast_filters, has_fast_matches = extract_fast_filters(corrected_query)
+    if has_fast_matches:
+        fast_filters["original_query"] = query
+        fast_filters["corrected_query"] = corrected_query
+        return validate_filters(fast_filters, corrected_query)
+
+    # --------------------------------------------------------
+    # STEP 3: DEFAULT STRUCTURE & LLM UNDERSTANDING FALLBACK
     # --------------------------------------------------------
 
     filters = empty_filters(
@@ -1137,16 +1195,13 @@ def understand_query(
     )
 
 
-    # --------------------------------------------------------
-    # STEP 3: LLM UNDERSTANDING
-    # --------------------------------------------------------
-
     try:
         raw_response = (
             _request_query_understanding(
                 corrected_query
             )
         )
+
 
         print()
         print("===== RAW QUERY UNDERSTANDING RESPONSE =====")

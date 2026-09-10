@@ -39,7 +39,8 @@ def call_llm(messages):
             model=MODEL_NAME,
             messages=messages,
             temperature=0.2,
-            timeout=30
+            timeout=30,
+            max_tokens=600
         )
 
     return retry_call(
@@ -70,6 +71,7 @@ def stream_llm(messages):
             messages=messages,
             temperature=0.2,
             timeout=30,
+            max_tokens=600,
             stream=True
         )
 

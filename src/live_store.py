@@ -7,8 +7,11 @@ customer-facing policy/content pages from the live Zyraluxe website.
 from __future__ import annotations
 
 import html
+import json
 import os
+from pathlib import Path
 import re
+import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -23,6 +26,15 @@ STORE_API_URL = os.getenv(
 )
 
 REQUEST_TIMEOUT = int(os.getenv("LIVE_STORE_TIMEOUT", "20"))
+CACHE_TTL = int(os.getenv("LIVE_STORE_CACHE_TTL", "86400"))  # 24 hours default
+PER_PAGE = 100
+
+_CACHE_DIR = Path(__file__).resolve().parent.parent / "data"
+_CACHE_FILE = _CACHE_DIR / "live_cache.json"
+
+_CACHED_PRODUCTS: list[dict[str, Any]] | None = None
+_CACHED_KNOWLEDGE: list[dict[str, str]] | None = None
+_LAST_FETCH_TIME: float = 0.0
 PER_PAGE = 100
 
 HEADERS = {
@@ -259,10 +271,77 @@ def fetch_live_knowledge() -> list[dict[str, str]]:
     return documents
 
 
-def fetch_live_store() -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """Fetch live products and live store knowledge in one call."""
-    products = fetch_live_products()
-    knowledge = fetch_live_knowledge()
-    print(f"Live Zyraluxe products loaded: {len(products)}")
-    print(f"Live Zyraluxe knowledge pages loaded: {len(knowledge)}")
-    return products, knowledge
+def _load_disk_cache() -> tuple[list[dict[str, Any]], list[dict[str, str]]] | None:
+    """Try to load products and knowledge from disk cache."""
+    try:
+        if _CACHE_FILE.exists():
+            with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            products = data.get("products")
+            knowledge = data.get("knowledge")
+            saved_at = data.get("saved_at", 0)
+            if isinstance(products, list) and isinstance(knowledge, list):
+                # Valid if within TTL or as fallback
+                return products, knowledge
+    except Exception as exc:
+        print(f"CACHE LOAD WARNING: {exc}")
+    return None
+
+
+def _save_disk_cache(products: list[dict[str, Any]], knowledge: list[dict[str, str]]) -> None:
+    """Save products and knowledge to disk cache."""
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "saved_at": time.time(),
+                "products": products,
+                "knowledge": knowledge,
+            }, f, ensure_ascii=False, indent=2)
+        print(f"Saved {len(products)} products and {len(knowledge)} knowledge docs to cache.")
+    except Exception as exc:
+        print(f"CACHE SAVE WARNING: {exc}")
+
+
+def fetch_live_store(force_refresh: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Fetch live products and knowledge with in-memory and disk caching."""
+    global _CACHED_PRODUCTS, _CACHED_KNOWLEDGE, _LAST_FETCH_TIME
+
+    now = time.time()
+
+    # 1. In-memory cache hit
+    if not force_refresh and _CACHED_PRODUCTS is not None and _CACHED_KNOWLEDGE is not None:
+        if now - _LAST_FETCH_TIME < CACHE_TTL:
+            return _CACHED_PRODUCTS, _CACHED_KNOWLEDGE
+
+    # 2. Disk cache hit
+    if not force_refresh:
+        disk_data = _load_disk_cache()
+        if disk_data is not None:
+            _CACHED_PRODUCTS, _CACHED_KNOWLEDGE = disk_data
+            _LAST_FETCH_TIME = now
+            print(f"Loaded store data from cache: {len(_CACHED_PRODUCTS)} products, {len(_CACHED_KNOWLEDGE)} knowledge docs.")
+            return _CACHED_PRODUCTS, _CACHED_KNOWLEDGE
+
+    # 3. Network fetch (first run or force refresh)
+    print("Fetching live store data from Zyraluxe website...")
+    try:
+        products = fetch_live_products()
+        knowledge = fetch_live_knowledge()
+        _CACHED_PRODUCTS = products
+        _CACHED_KNOWLEDGE = knowledge
+        _LAST_FETCH_TIME = now
+        _save_disk_cache(products, knowledge)
+        print(f"Live Zyraluxe products loaded: {len(products)}")
+        print(f"Live Zyraluxe knowledge pages loaded: {len(knowledge)}")
+        return products, knowledge
+    except Exception as exc:
+        print(f"LIVE STORE FETCH FAILED: {exc}")
+        # Try fallback to disk cache even if expired
+        disk_data = _load_disk_cache()
+        if disk_data is not None:
+            print("Using stale disk cache as fallback.")
+            _CACHED_PRODUCTS, _CACHED_KNOWLEDGE = disk_data
+            return _CACHED_PRODUCTS, _CACHED_KNOWLEDGE
+        raise
+

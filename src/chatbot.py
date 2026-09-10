@@ -55,7 +55,7 @@ from src.config import (
 
 class JewelleryChatbot:
 
-    def __init__(self):
+    def __init__(self, products=None, knowledge=None, conversation=None):
 
         print()
         print(
@@ -65,73 +65,46 @@ class JewelleryChatbot:
         # ----------------------------------------------------
         # LOAD LIVE ZYRALUXE DATA
         # ----------------------------------------------------
-
-        # Do NOT use the old dummy products.json dataset.
-        # Products and customer-facing store knowledge come from
-        # the live Zyraluxe WordPress/WooCommerce site.
-        self.products, self.knowledge = fetch_live_store()
-
-        print(
-            f"Loaded {len(self.products)} products."
-        )
-
-        print(
-            f"Loaded {len(self.knowledge)} knowledge documents."
-        )
-
+        if products is not None and knowledge is not None:
+            self.products = products
+            self.knowledge = knowledge
+            print(f"Reusing pre-loaded {len(self.products)} products and {len(self.knowledge)} knowledge documents.")
+        else:
+            self.products, self.knowledge = fetch_live_store()
+            print(
+                f"Loaded {len(self.products)} products."
+            )
+            print(
+                f"Loaded {len(self.knowledge)} knowledge documents."
+            )
 
         # ----------------------------------------------------
         # PRODUCT EMBEDDINGS
         # ----------------------------------------------------
-
-        print(
-            "Creating product embeddings..."
-        )
-
         self.product_embeddings = (
             build_product_embeddings(
                 self.products
             )
         )
 
-        print(
-            "Product embeddings created."
-        )
-
-
         # ----------------------------------------------------
         # KNOWLEDGE EMBEDDINGS
         # ----------------------------------------------------
-
         if self.knowledge:
-
-            print(
-                "Creating knowledge embeddings..."
-            )
-
             self.knowledge_embeddings = (
                 build_knowledge_embeddings(
                     self.knowledge
                 )
             )
-
-            print(
-                "Knowledge embeddings created."
-            )
-
         else:
-
             self.knowledge_embeddings = []
-
 
         # ----------------------------------------------------
         # CONVERSATION
         # ----------------------------------------------------
-
         self.conversation = (
-            ConversationState()
+            conversation if conversation is not None else ConversationState()
         )
-
 
         print(
             "Chatbot ready."
@@ -251,7 +224,7 @@ Content:
 
         print(
             f"Recommended: {product['name']} | "
-            f"₹{product['price']:,}"
+            f"Rs. {product['price']:,}"
         )
 
         try:
@@ -376,7 +349,7 @@ Content:
                 product = result["product"]
                 print(
                     f"{rank}. {product['name']} | "
-                    f"₹{product['price']:,} | "
+                    f"Rs. {product['price']:,} | "
                     f"Score={result['score']:.3f}"
                 )
 
@@ -458,43 +431,14 @@ Content:
             return
 
         # --------------------------------------------------------
-        # VALIDATE COMPLETE ANSWER
-        # --------------------------------------------------------
-        try:
-            validation_result = validate_answer(
-                query,
-                validation_context,
-                answer
-            )
-        except Exception as e:
-            print(f"\nValidation error: {e}")
-            return
-
-        if (
-            not isinstance(validation_result, tuple)
-            or len(validation_result) != 2
-        ):
-            print("\nVALIDATION ERROR: Invalid validator response.")
-            return
-
-        valid, validation_message = validation_result
-
-        if valid:
-            final_answer = answer
-            print("\nVALIDATION: PASSED")
-        else:
-            print("\nVALIDATION: FAILED")
-            print(validation_message)
-            final_answer = (
-                "I couldn't verify that answer from the available store information."
-            )
-
-        # --------------------------------------------------------
         # MEMORY
         # --------------------------------------------------------
+        # In streaming mode, chunks have already been emitted in real time.
+        # Save the answer directly to conversation memory without blocking
+        # the stream completion with a redundant post-stream LLM call.
         self.conversation.add_message(
             query,
-            final_answer
+            answer
         )
 
 
@@ -854,15 +798,10 @@ Content:
 
 
                 print(
-
                     f"{rank}. "
-
                     f"{product['name']} | "
-
-                    f"₹{product['price']:,} | "
-
+                    f"Rs. {product['price']:,} | "
                     f"Score={result['score']:.3f}"
-
                 )
 
 

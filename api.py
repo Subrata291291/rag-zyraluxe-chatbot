@@ -154,18 +154,22 @@ app.add_middleware(
 
 
 # ============================================================
-# SESSION STORE
+# SHARED STORE & SESSION STORE
 # ============================================================
 
-# Development-only storage.
-#
-# Each session currently owns a JewelleryChatbot because the
-# chatbot contains ConversationState.
-#
-# For production with multiple workers, replace this with
-# a shared session store such as Redis and avoid relying on
-# process-local memory.
+_SHARED_PRODUCTS = None
+_SHARED_KNOWLEDGE = None
 
+def get_shared_store():
+    global _SHARED_PRODUCTS, _SHARED_KNOWLEDGE
+    if _SHARED_PRODUCTS is None or _SHARED_KNOWLEDGE is None:
+        _SHARED_PRODUCTS, _SHARED_KNOWLEDGE = fetch_live_store()
+    return _SHARED_PRODUCTS, _SHARED_KNOWLEDGE
+
+
+# Development/in-process session storage.
+# Each session owns a JewelleryChatbot with individual ConversationState,
+# sharing the pre-loaded product and knowledge catalog.
 sessions: Dict[str, JewelleryChatbot] = {}
 
 
@@ -261,38 +265,20 @@ def check_access(
 def get_or_create_session(
     session_id: str | None
 ) -> Tuple[str, JewelleryChatbot]:
+    products, knowledge = get_shared_store()
 
     # Existing session
-
     if session_id:
-
-        chatbot = sessions.get(
-            session_id
-        )
-
+        chatbot = sessions.get(session_id)
         if chatbot is not None:
-
-            return (
-                session_id,
-                chatbot
-            )
+            return (session_id, chatbot)
 
     # New session
+    new_session_id = str(uuid4())
+    chatbot = JewelleryChatbot(products=products, knowledge=knowledge)
+    sessions[new_session_id] = chatbot
+    return (new_session_id, chatbot)
 
-    new_session_id = str(
-        uuid4()
-    )
-
-    chatbot = JewelleryChatbot()
-
-    sessions[
-        new_session_id
-    ] = chatbot
-
-    return (
-        new_session_id,
-        chatbot
-    )
 
 
 # ============================================================
@@ -394,6 +380,21 @@ async def request_guard(
             status_code=500,
             detail="Internal server error."
         )
+
+
+# ============================================================
+# STARTUP PRELOAD
+# ============================================================
+
+@app.on_event("startup")
+def preload_store():
+    """Preload products and knowledge into memory on server startup."""
+    try:
+        print("Preloading store data on startup...")
+        get_shared_store()
+        print("Store data ready.")
+    except Exception as exc:
+        print(f"STARTUP PRELOAD WARNING: {exc}")
 
 
 # ============================================================
@@ -705,6 +706,8 @@ def chat_stream(
             f"data: {session_id}\n\n"
         )
 
+        products_emitted = False
+
         try:
 
             # ------------------------------------------------
@@ -714,6 +717,21 @@ def chat_stream(
             for chunk in chatbot.ask_stream(
                 message
             ):
+                # Emit products event immediately if available
+                if not products_emitted:
+                    current_products = build_product_payload(chatbot)
+                    current_ids = product_ids(current_products)
+                    if current_products and current_ids != before_ids:
+                        product_json = json.dumps(
+                            current_products,
+                            ensure_ascii=False,
+                            default=str
+                        )
+                        yield (
+                            "event: products\n"
+                            f"data: {product_json}\n\n"
+                        )
+                        products_emitted = True
 
                 if not chunk:
                     continue
@@ -746,39 +764,28 @@ def chat_stream(
                 yield "\n"
 
             # ------------------------------------------------
-            # PRODUCT RESULTS
+            # Check products if not emitted yet
             # ------------------------------------------------
-            #
-            # ask_stream() has now completed and the chatbot
-            # conversation contains the latest product results.
-            #
-            # Only send the product event when the product
-            # selection changed during this request.
-            # ------------------------------------------------
-
-            after_products = build_product_payload(
-                chatbot
-            )
-
-            after_ids = product_ids(
-                after_products
-            )
-
-            if (
-                after_products
-                and after_ids != before_ids
-            ):
-
-                product_json = json.dumps(
-                    after_products,
-                    ensure_ascii=False,
-                    default=str
+            if not products_emitted:
+                after_products = build_product_payload(
+                    chatbot
                 )
-
-                yield (
-                    "event: products\n"
-                    f"data: {product_json}\n\n"
+                after_ids = product_ids(
+                    after_products
                 )
+                if (
+                    after_products
+                    and after_ids != before_ids
+                ):
+                    product_json = json.dumps(
+                        after_products,
+                        ensure_ascii=False,
+                        default=str
+                    )
+                    yield (
+                        "event: products\n"
+                        f"data: {product_json}\n\n"
+                    )
 
             # ------------------------------------------------
             # Streaming completed
@@ -835,8 +842,11 @@ def sync_live_store():
     Existing local sessions are cleared so the next session reloads
     the current live product and policy data.
     """
+    global _SHARED_PRODUCTS, _SHARED_KNOWLEDGE
     try:
-        products, knowledge = fetch_live_store()
+        products, knowledge = fetch_live_store(force_refresh=True)
+        _SHARED_PRODUCTS = products
+        _SHARED_KNOWLEDGE = knowledge
         sessions.clear()
 
         return {
